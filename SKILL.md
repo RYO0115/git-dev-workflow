@@ -1,6 +1,6 @@
 ---
 name: git-dev-workflow
-description: Git-Flow ベースのブランチ運用・コミット・CI・Pull Request のルールに従って開発を進めるためのスキル。ブランチを切る／コミットする／PR を作成する／リリースやホットフィックスを行う際に必ず参照する。C++ は clang-tidy + GoogleTest、Python は PyLint + pytest を前提とする。
+description: Git-Flow ベースのブランチ運用・コミット・CI・Pull Request のルールに従って開発を進めるためのスキル。ブランチを切る／コミットする／PR を作成する／リリースやホットフィックスを行う際に必ず参照する。複数セッション・複数エージェントで同じリポジトリを同時に編集するための git worktree 運用（作成スクリプト・共有リソースの排他）も含む。C++ は clang-tidy + GoogleTest、Python は PyLint + pytest を前提とする。
 ---
 
 # Git 開発ワークフロー
@@ -27,6 +27,92 @@ Git-Flow を採用したチーム開発のルール。ブランチ作成・コ�
 | hotfix | `hotfix/issue番号_機能名` | issue 等で報告されたバグ修正 | **`main` と `dev` の両方**へ 1 本ずつ |
 
 > **共通ルール（release / hotfix）**: 立ち位置は同じ。テスト・修正の完了後に `main` へ PR を出し、さらに `dev` へも PR を出して両ブランチへ反映する。`main` にだけ入れて `dev` へ戻し忘れることがないよう必ず 2 本作成する。
+
+### 並行開発（git worktree）
+
+複数のセッション（複数の Claude Code、複数のターミナル、複数の担当者）が**同時に別ブランチを編集する**場合、`git checkout` でブランチを切り替える運用は使えない。一方のチェックアウトが他方の作業ディレクトリを書き換えてしまうため。**git worktree** を使い、1 リポジトリに対して作業ディレクトリを複数持つ。
+
+#### 原則
+
+- **1 ブランチ = 1 worktree**。同じブランチを 2 つの worktree でチェックアウトすることは git が拒否する。
+- worktree は**リポジトリの外**に置く。親ディレクトリ配下に `<repo>-worktrees/<branch のスラッシュを - に置換>/` を切るのが既定。リポジトリ内に置くと、テストランナーやパッケージ探索（例: pytest の `testpaths` / `pythonpath`、CMake の再帰探索）が worktree 側のコピーまで拾って原因の分かりにくい失敗をする。
+- ブランチの命名規則・分岐元は[作業ブランチ](#作業ブランチ)と同じ。worktree にしたからといって `dev` 起点は変わらない。
+
+#### 素の `git worktree add` を直接叩かない
+
+`git worktree add` が持ってくるのは **git の追跡対象だけ**。gitignore されている作業用リソースは新しい worktree に存在せず、実行時に初めて失敗する。典型的には以下。
+
+| 欠けるもの | 症状 |
+| --- | --- |
+| submodule の中身 | 空ディレクトリのまま。参照先のツール・設定が読み込まれない |
+| `.env` 等の秘密情報 | API キー未設定でランタイムエラー |
+| 仮想環境 / ビルドディレクトリ（`.venv`, `build/`） | 依存が解決できない・ビルドが通らない |
+| エディタ / エージェントのローカル設定 | 権限プロンプトや設定が初期状態に戻る |
+
+そのため、**リポジトリごとに worktree 作成スクリプトを用意し、worktree はそれ経由でのみ作る**。プロジェクトの `CLAUDE.md` にもそのスクリプトを使う旨を明記する（スキルは常時読み込まれるとは限らないため）。
+
+スクリプトが担う処理は次の 5 つ。
+
+1. `git fetch origin --prune`
+2. `git worktree add` — ローカルブランチが既にあればそれを、`origin/<branch>` があれば追跡ブランチとして、どちらも無ければベースブランチ（既定 `dev`）から新規作成
+3. `git submodule update --init --recursive`（入れ子 submodule があるので `--recursive` は必須）
+4. gitignore された作業ファイルを本体（main worktree）からコピー
+5. 依存導入（Python: `uv sync` / C++: CMake の configure）
+
+雛形（Python + uv の例。`.env` やコピー対象はプロジェクトに合わせて差し替える）:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+BRANCH="${1:?usage: $0 <branch> [base-branch]}"; BASE="${2:-dev}"
+
+MAIN_ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+WORKTREE_DIR="$(dirname "$MAIN_ROOT")/$(basename "$MAIN_ROOT")-worktrees/${BRANCH//\//-}"
+[[ -e "$WORKTREE_DIR" ]] && { echo "error: $WORKTREE_DIR は既に存在します" >&2; exit 1; }
+
+git -C "$MAIN_ROOT" fetch origin --prune
+if git -C "$MAIN_ROOT" show-ref --verify --quiet "refs/heads/${BRANCH}"; then
+  git -C "$MAIN_ROOT" worktree add "$WORKTREE_DIR" "$BRANCH"
+elif git -C "$MAIN_ROOT" show-ref --verify --quiet "refs/remotes/origin/${BRANCH}"; then
+  git -C "$MAIN_ROOT" worktree add --track -b "$BRANCH" "$WORKTREE_DIR" "origin/${BRANCH}"
+else
+  git -C "$MAIN_ROOT" show-ref --verify --quiet "refs/remotes/origin/${BASE}" \
+    && BASE_REF="origin/${BASE}" || BASE_REF="${BASE}"
+  git -C "$MAIN_ROOT" worktree add -b "$BRANCH" "$WORKTREE_DIR" "$BASE_REF"
+fi
+
+git -C "$WORKTREE_DIR" submodule update --init --recursive
+for f in .env .claude/settings.local.json; do
+  [[ -f "${MAIN_ROOT}/${f}" ]] || continue
+  mkdir -p "$(dirname "${WORKTREE_DIR}/${f}")" && cp "${MAIN_ROOT}/${f}" "${WORKTREE_DIR}/${f}"
+done
+(cd "$WORKTREE_DIR" && uv sync)
+```
+
+#### 片付け
+
+```bash
+git worktree remove <path>   # 通常の削除
+git worktree list            # 残っている worktree の確認
+git worktree prune           # ディレクトリを手で消してしまった場合の後始末
+```
+
+マージ済みブランチの削除は通常どおり `git branch -d`。
+
+#### コミット対象の共有リソースは排他する
+
+**リポジトリにコミットされていて、かつプログラムが書き換えるファイル**（SQLite DB、スナップショット、生成済みデータセット、ロックファイル等）は、並行開発における最大の事故源。バイナリなら git はマージできず、テキストでも自動生成の差分は高確率でコンフリクトする。
+
+- そうしたファイルを**書き換える処理を、2 つ以上の worktree で同時に走らせない**。
+- プロジェクトの `CLAUDE.md` に、対象ファイル名と「同時に触らない」ルールを明記する。
+- 並行作業するなら、**書き換えを伴うブランチは常に 1 本だけ**にし、他の worktree は読み取りのみの作業（ロジック実装・テスト・ドキュメント）に限定する。
+- 作業開始前に `git worktree list` で他の worktree の存在を確認する。
+
+#### その他の注意
+
+- **仮想環境・ビルドディレクトリは worktree ごとに独立**。本体で依存を追加しても他の worktree には反映されない。各 worktree で `uv sync` / re-configure し直す。
+- **秘密情報はコピーであって共有ではない**。本体の `.env` を更新したら、稼働中の worktree にも反映する。
+- **submodule のコミットがブランチ間で違う場合**、チェックアウト後に `git submodule update --init --recursive` が要る。
 
 ### バージョン / タグ
 
@@ -123,6 +209,8 @@ PR トリガーで **静的解析** と **自動テスト** の両ジョブを�
 ### 作業チェックリスト
 
 - [ ] 作業ブランチを `dev` から命名規則に沿って作成した
+- [ ] 並行セッションで作業する場合、worktree をプロジェクトの作成スクリプト経由で用意した
+- [ ] コミット対象の共有リソース（DB・生成データ等）を他の worktree と同時に書き換えていない
 - [ ] コミットは細かく、push 前に squash した
 - [ ] ローカルで静的解析（clang-tidy / PyLint）とテスト（GoogleTest / pytest）が Green
 - [ ] PR 本文に上記 6 項目を記載した
