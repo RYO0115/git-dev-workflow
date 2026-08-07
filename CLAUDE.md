@@ -20,6 +20,14 @@ There is no source code, build system, or committed history yet. When code is ad
 - **release branches** (`release/v1.0.0`): branch from `dev` for final pre-release testing. When testing passes, open **two** PRs — one into `main` and one back into `dev`.
 - **hotfix branches** (`hotfix/issue番号_名前`): branch from `dev` to fix a reported bug. Same as release — merge back into **both** `main` and `dev` via two PRs.
 
+## Parallel development (git worktree)
+
+When several sessions/agents edit the same repository at once, use **git worktree**, not `git checkout` — one branch per worktree, placed *outside* the repository (`<repo>-worktrees/<slug>/`).
+
+A bare `git worktree add` only brings across git-tracked content, so gitignored working resources (submodule contents, `.env`, virtualenvs, local editor/agent settings) are missing and fail at runtime. Each repository must therefore provide a worktree-creation script (fetch → `worktree add` → `submodule update --init --recursive` → copy ignored files from the main worktree → install dependencies), and worktrees must be created only through it. Record that in the consuming project's `CLAUDE.md`, since skills are not always loaded.
+
+Committed resources that programs rewrite (SQLite DBs, generated datasets, snapshots) must never be written from two worktrees concurrently — git cannot merge them.
+
 ## Versioning / tags
 
 Version format is `major.minor.build`:

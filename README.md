@@ -94,6 +94,12 @@ Git-Flow を採用する。
 
 - **バージョン**: `major.minor.build`。アーキテクチャ変更は major、機能追加・バグ修正は minor、細かい修正ごとに build をインクリメント。
 
+### 並行開発（git worktree）
+
+複数セッション・複数エージェントで同じリポジトリを同時に編集する場合は `git checkout` ではなく **git worktree** を使う（1 ブランチ = 1 worktree、置き場所はリポジトリの外）。
+
+素の `git worktree add` は gitignore された作業リソース（submodule の中身・`.env`・仮想環境・ローカル設定）を持ってこないため、**リポジトリごとに worktree 作成スクリプトを用意し、それ経由でのみ作る**。またコミット対象の共有リソース（SQLite DB・生成データ等）は複数 worktree から同時に書き換えない。詳細と雛形スクリプトは `SKILL.md` を参照。
+
 ### コミット
 
 細かくローカルコミットし、リモートへ push する際に squash してまとめる。
