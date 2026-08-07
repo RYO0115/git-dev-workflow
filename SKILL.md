@@ -262,7 +262,7 @@ issue 起因の作業では、あわせて[issue の紐づけ](#issue-の紐づ�
   指示が曖昧だったせいの手戻りは、次の指示の書き方に反映できる。
 - `task.yaml` を作らずに会話だけで実装した場合は不要。
 
-```markdown
+````markdown
 <details>
 <summary>実装指示（task.yaml）</summary>
 
@@ -274,7 +274,7 @@ acceptance:
 ```
 
 </details>
-```
+````
 
 ### issue の紐づけ（issue 起因なら必須）
 
